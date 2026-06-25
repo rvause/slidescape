@@ -223,6 +223,7 @@ const char* get_image_descriptive_type_name(image_t* image);
 bool init_image_from_tiff(image_t* image, tiff_t tiff, bool is_overlay, image_t* parent_image);
 u8* decode_associated_image_from_isyntax(isyntax_t* isyntax, isyntax_image_t* image);
 bool init_image_from_isyntax(image_t* image, isyntax_t* isyntax, bool is_overlay);
+void image_isyntax_set_postprocessing(image_t* image, bool enabled);
 bool init_image_from_dicom(image_t* image, dicom_series_t* dicom, bool is_overlay);
 bool init_image_from_mrxs(image_t* image, mrxs_t* mrxs, bool is_overlay);
 bool init_image_from_stbi(image_t* image, simple_image_t* simple, bool is_overlay);

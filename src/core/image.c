@@ -486,10 +486,77 @@ bool init_image_from_isyntax(image_t* image, isyntax_t* isyntax, bool is_overlay
         }
     }
 
+    // Enable post-processing (CLAHE + sharpness) by default.
+    // Slides without embedded params are no-ops regardless of flags.
+    isyntax_image_t* wsi_pp = isyntax->images + isyntax->wsi_image_index;
+    libisyntax_image_set_postprocessing(wsi_pp, LIBISYNTAX_POSTPROCESSING_ALL);
+    // Build the CLAHE LUT grid via a short-lived cache (the viewer path has no
+    // persistent cache; this temporary one is only used for the thumbnail decode).
+    isyntax_cache_t* prep_cache = NULL;
+    if (libisyntax_cache_create("isyntax-postproc-prep", 100, &prep_cache) == LIBISYNTAX_OK) {
+        prep_cache->allocator_block_width    = isyntax->block_width;
+        prep_cache->allocator_block_height   = isyntax->block_height;
+        prep_cache->ll_coeff_block_allocator = isyntax->ll_coeff_block_allocator;
+        prep_cache->h_coeff_block_allocator  = isyntax->h_coeff_block_allocator;
+        prep_cache->is_block_allocator_owned = false;
+        libisyntax_image_prepare_postprocessing(isyntax, prep_cache, wsi_pp);
+        libisyntax_cache_destroy(prep_cache);
+    }
 
     image->is_valid = true;
     image->is_freshly_loaded = true;
     return image->is_valid;
+}
+
+void image_isyntax_set_postprocessing(image_t* image, bool enabled) {
+    if (image->backend != IMAGE_BACKEND_ISYNTAX) return;
+    isyntax_t* isyntax = &image->isyntax;
+    isyntax_image_t* wsi = isyntax->images + isyntax->wsi_image_index;
+
+    // Set flags first so any in-flight decode picks up the new value.
+    wsi->postprocessing_flags = enabled ? LIBISYNTAX_POSTPROCESSING_ALL
+                                        : LIBISYNTAX_POSTPROCESSING_NONE;
+
+    // Reset tile and level state so the streamer re-decodes everything.
+    //
+    // Two flags must be cleared together, both unconditionally:
+    //
+    // 1. is_fully_loaded — the streaming path computes scales_to_load_count by
+    //    walking levels from the coarsest down and decrementing for each fully-
+    //    loaded level. Leaving them true produces a count of zero and the
+    //    streamer loads nothing permanently.
+    //
+    // 2. is_submitted_for_loading — set by isyntax_begin_load_tile and NEVER
+    //    cleared after successful async completion. Tiles loaded during
+    //    first_load therefore keep this flag true forever. Resetting only
+    //    is_loaded while leaving is_submitted_for_loading=true causes the
+    //    streaming path to skip every one of those tiles indefinitely
+    //    (the check is `if (tile->is_submitted_for_loading) continue`).
+    //    Resetting it risks a rare double-decode for tiles genuinely in-flight
+    //    at this exact moment, but that is safe — each decode allocates its own
+    //    pixel buffer and the second GPU upload simply overwrites the first.
+    for (i32 level = 0; level < wsi->level_count; ++level) {
+        isyntax_level_t* lvl = wsi->levels + level;
+        lvl->is_fully_loaded = false;
+        for (i32 ti = 0; ti < lvl->tile_count; ++ti) {
+            isyntax_tile_t* tile = lvl->tiles + ti;
+            tile->is_loaded = false;
+            tile->is_submitted_for_loading = false;
+        }
+    }
+
+    // Clear GPU residency so the renderer does not draw stale textures while
+    // tiles are re-decoding.
+    if (image->tile_cache) {
+        for (i32 level = 0; level < image->level_count; ++level) {
+            tile_cache_tile_t* tiles = image->tile_cache->level_tiles[level];
+            if (!tiles) continue;
+            i32 tile_count = image->level_images[level].tile_count;
+            for (i32 ti = 0; ti < tile_count; ++ti) {
+                tiles[ti].gpu_resident = false;
+            }
+        }
+    }
 }
 
 bool init_image_from_dicom(image_t* image, dicom_series_t* dicom, bool is_overlay) {

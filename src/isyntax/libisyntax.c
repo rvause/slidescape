@@ -522,3 +522,115 @@ isyntax_error_t libisyntax_read_icc_profile(isyntax_t* isyntax, isyntax_image_t*
         return LIBISYNTAX_FATAL;
     }
 }
+
+void libisyntax_image_set_postprocessing(isyntax_image_t* image, int32_t flags) {
+    image->postprocessing_flags = flags;
+}
+
+isyntax_error_t libisyntax_image_prepare_postprocessing(isyntax_t* isyntax,
+                                                        isyntax_cache_t* cache,
+                                                        isyntax_image_t* image) {
+    if (!(image->postprocessing_flags & LIBISYNTAX_POSTPROCESSING_CLAHE)) return LIBISYNTAX_OK;
+    if (image->clahe_nr_bins <= 0 || image->clahe_context_dim <= 0) return LIBISYNTAX_OK;
+    if (image->image_type != ISYNTAX_IMAGE_TYPE_WSI) return LIBISYNTAX_INVALID_ARGUMENT;
+
+    if (image->clahe_lut_grid) {
+        free(image->clahe_lut_grid);
+        image->clahe_lut_grid = NULL;
+    }
+
+    isyntax_level_t* coarse = image->levels + image->max_scale;
+    i32 tile_width  = isyntax->tile_width;
+    i32 tile_height = isyntax->tile_height;
+    i32 luma_w = coarse->width_in_tiles  * tile_width;
+    i32 luma_h = coarse->height_in_tiles * tile_height;
+
+    u8* luma_buf = (u8*)malloc((size_t)luma_w * luma_h);
+    if (!luma_buf) return LIBISYNTAX_FATAL;
+
+    u32* tile_rgba = (u32*)malloc((size_t)tile_width * tile_height * sizeof(u32));
+    if (!tile_rgba) { free(luma_buf); return LIBISYNTAX_FATAL; }
+
+    for (i32 ty = 0; ty < coarse->height_in_tiles; ++ty) {
+        for (i32 tx = 0; tx < coarse->width_in_tiles; ++tx) {
+            isyntax_tile_read(isyntax, cache, image->max_scale, tx, ty,
+                              tile_rgba, LIBISYNTAX_PIXEL_FORMAT_RGBA);
+            u8* dest_row = luma_buf + ty * tile_height * luma_w + tx * tile_width;
+            for (i32 py = 0; py < tile_height; ++py) {
+                const u32* src = tile_rgba + py * tile_width;
+                u8* dst = dest_row + py * luma_w;
+                for (i32 px = 0; px < tile_width; ++px) {
+                    u32 rgba = src[px];
+                    u32 r = (rgba >>  0) & 0xFF;
+                    u32 g = (rgba >>  8) & 0xFF;
+                    u32 b = (rgba >> 16) & 0xFF;
+                    dst[px] = (u8)((r + g + g + b) >> 2);
+                }
+            }
+        }
+    }
+    free(tile_rgba);
+
+    i32 ctx  = image->clahe_context_dim;
+    i32 bins = image->clahe_nr_bins;
+    i32 gw   = (luma_w + ctx - 1) / ctx;
+    i32 gh   = (luma_h + ctx - 1) / ctx;
+
+    u8* grid = (u8*)malloc((size_t)gw * gh * bins);
+    if (!grid) { free(luma_buf); return LIBISYNTAX_FATAL; }
+
+    u32* hist = (u32*)malloc((size_t)bins * sizeof(u32));
+    if (!hist) { free(grid); free(luma_buf); return LIBISYNTAX_FATAL; }
+
+    float clip_count = (image->clahe_clip_limit > 0.0f) ? image->clahe_clip_limit : 40.0f;
+
+    for (i32 gy = 0; gy < gh; ++gy) {
+        for (i32 gx = 0; gx < gw; ++gx) {
+            i32 x0 = gx * ctx;
+            i32 y0 = gy * ctx;
+            i32 x1 = x0 + ctx; if (x1 > luma_w) x1 = luma_w;
+            i32 y1 = y0 + ctx; if (y1 > luma_h) y1 = luma_h;
+            i32 n  = (x1 - x0) * (y1 - y0);
+
+            memset(hist, 0, (size_t)bins * sizeof(u32));
+            for (i32 py = y0; py < y1; ++py) {
+                const u8* row = luma_buf + py * luma_w;
+                for (i32 px = x0; px < x1; ++px) {
+                    u32 bin = (u32)row[px] * (u32)bins >> 8;
+                    if (bin >= (u32)bins) bin = (u32)bins - 1;
+                    ++hist[bin];
+                }
+            }
+
+            u32 clip = (u32)(clip_count * (float)n / (float)bins);
+            if (clip < 1) clip = 1;
+            u32 excess = 0;
+            for (i32 b = 0; b < bins; ++b) {
+                if (hist[b] > clip) { excess += hist[b] - clip; hist[b] = clip; }
+            }
+            u32 redist = excess / (u32)bins;
+            u32 leftover = excess - redist * (u32)bins;
+            for (i32 b = 0; b < bins; ++b) {
+                hist[b] += redist;
+                if ((u32)b < leftover) ++hist[b];
+            }
+
+            u8* lut = grid + ((size_t)gy * gw + gx) * bins;
+            u32 cdf = 0;
+            for (i32 b = 0; b < bins; ++b) {
+                cdf += hist[b];
+                u32 mapped = (cdf * 255u + (u32)n / 2) / (u32)n;
+                lut[b] = (u8)(mapped < 255u ? mapped : 255u);
+            }
+        }
+    }
+    free(hist);
+    free(luma_buf);
+
+    image->clahe_lut_grid    = grid;
+    image->clahe_grid_width  = gw;
+    image->clahe_grid_height = gh;
+    image->clahe_luma_width  = luma_w;
+    image->clahe_luma_height = luma_h;
+    return LIBISYNTAX_OK;
+}

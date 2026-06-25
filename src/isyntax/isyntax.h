@@ -323,6 +323,23 @@ typedef struct isyntax_image_t {
 	bool first_load_in_progress;
 	i64 base64_encoded_icc_profile_file_offset;
 	size_t base64_encoded_icc_profile_len;
+
+	// Post-processing metadata (parsed from header; all zero if absent)
+	float sharpness_gain[16];         // DP_SHARPNESS_GAIN_RGB24, indexed by scale (0=finest)
+	i32   post_processing_level_count;
+	float clahe_clip_limit;           // DP_CLAHE_CLIP_LIMIT_Y16
+	i32   clahe_nr_bins;              // DP_CLAHE_NR_BINS_Y16
+	i32   clahe_context_dim;          // DP_CLAHE_CONTEXT_DIMENSION_Y16
+
+	// Post-processing runtime state (default 0 = off)
+	i32 postprocessing_flags;
+
+	// CLAHE precomputed LUT grid (NULL until libisyntax_image_prepare_postprocessing called)
+	u8* clahe_lut_grid;               // grid_w * grid_h * clahe_nr_bins bytes
+	i32 clahe_grid_width;
+	i32 clahe_grid_height;
+	i32 clahe_luma_width;
+	i32 clahe_luma_height;
 } isyntax_image_t;
 
 typedef struct isyntax_parser_node_t {
@@ -366,6 +383,7 @@ typedef struct isyntax_xml_parser_t {
 	i32 block_header_index_for_cluster;
 	i32 dimension_index;
 	i32 valid_data_envelope_index;
+	i32 post_processing_level_index;
 	bool initialized;
 } isyntax_xml_parser_t;
 

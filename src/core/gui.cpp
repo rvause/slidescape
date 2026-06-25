@@ -1396,6 +1396,28 @@ void gui_draw(app_state_t* app_state, input_t* input, i32 client_width, i32 clie
 		}
 		ImGui::NewLine();
 
+		// Post-processing toggle — always shown; disabled for non-iSyntax formats or
+		// iSyntax slides whose header carries no post-processing parameters.
+		{
+			image_t* pp_img = (arrlen(app_state->loaded_images) > 0)
+			                  ? app_state->loaded_images[0] : NULL;
+			bool is_isyntax_with_pp = false;
+			bool pp_enabled = false;
+			if (pp_img && pp_img->backend == IMAGE_BACKEND_ISYNTAX) {
+				isyntax_image_t* wsi = pp_img->isyntax.images + pp_img->isyntax.wsi_image_index;
+				if (wsi->clahe_nr_bins > 0 || wsi->sharpness_gain[0] != 0.0f) {
+					is_isyntax_with_pp = true;
+					pp_enabled = (wsi->postprocessing_flags == LIBISYNTAX_POSTPROCESSING_ALL);
+				}
+			}
+			if (!is_isyntax_with_pp) ImGui::BeginDisabled();
+			if (ImGui::Checkbox("Post-processing (contrast & sharpness)", &pp_enabled)) {
+				image_isyntax_set_postprocessing(pp_img, pp_enabled);
+			}
+			if (!is_isyntax_with_pp) ImGui::EndDisabled();
+		}
+		ImGui::NewLine();
+
 		ImGui::Checkbox("Use image adjustments", &app_state->use_image_adjustments);
 
 		bool disable_gui = !app_state->use_image_adjustments;
