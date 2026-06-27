@@ -2428,7 +2428,148 @@ void isyntax_load_tile(isyntax_t* isyntax, isyntax_image_t* wsi, i32 scale, i32 
 //		stbi_write_png("debug_dwt_output.png", tile_width, tile_height, 4, out_buffer_or_null, tile_width * 4);
 //	}
 
-	release_temp_memory(&temp_memory); // free Y, Co and Cg
+	if (wsi->postprocessing_enabled) {
+		const u8* lut = wsi->tone_lut;
+		i32 n_pixels = tile_width * tile_height;
+
+		// T4: Tone-map LUT — apply to R, G, B channels; alpha is unchanged.
+		{
+			i32 i = 0;
+#if defined(__ARM_NEON)
+			i32 n_simd = (n_pixels / 8) * 8;
+			for (; i < n_simd; i += 8) {
+				uint8x8x4_t px = vld4_u8((uint8_t*)(out_buffer_or_null + i));
+				for (int lane = 0; lane < 8; ++lane) {
+					px.val[0][lane] = lut[px.val[0][lane]];
+					px.val[1][lane] = lut[px.val[1][lane]];
+					px.val[2][lane] = lut[px.val[2][lane]];
+				}
+				vst4_u8((uint8_t*)(out_buffer_or_null + i), px);
+			}
+#endif
+			for (; i < n_pixels; ++i) {
+				u32 p = out_buffer_or_null[i];
+				u32 r = lut[(p >>  0) & 0xFF];
+				u32 g = lut[(p >>  8) & 0xFF];
+				u32 b = lut[(p >> 16) & 0xFF];
+				out_buffer_or_null[i] = r | (g << 8) | (b << 16) | (p & 0xFF000000u);
+			}
+		}
+
+		// T5: Sharpness — separable 5x5 Gaussian blur + unsharp mask combine.
+		if (wsi->sharpness != 0.0f) {
+			size_t tile_pixels = (size_t)tile_width * tile_height;
+			u32* horiz = (u32*)arena_push_size(temp_memory.arena, tile_pixels * sizeof(u32));
+			u32* blur  = (u32*)arena_push_size(temp_memory.arena, tile_pixels * sizeof(u32));
+
+			// Pass 1: horizontal Gaussian [1 4 6 4 1]/16.
+			for (i32 py = 0; py < tile_height; ++py) {
+				for (i32 px = 0; px < tile_width; ++px) {
+					i32 x0 = px - 2; if (x0 < 0) x0 = 0;
+					i32 x1 = px - 1; if (x1 < 0) x1 = 0;
+					i32 x2 = px;
+					i32 x3 = px + 1; if (x3 >= tile_width) x3 = tile_width - 1;
+					i32 x4 = px + 2; if (x4 >= tile_width) x4 = tile_width - 1;
+					u32 p0 = out_buffer_or_null[py * tile_width + x0];
+					u32 p1 = out_buffer_or_null[py * tile_width + x1];
+					u32 p2 = out_buffer_or_null[py * tile_width + x2];
+					u32 p3 = out_buffer_or_null[py * tile_width + x3];
+					u32 p4 = out_buffer_or_null[py * tile_width + x4];
+					u32 r = ((p0>>0&0xFF) + 4*(p1>>0&0xFF) + 6*(p2>>0&0xFF) + 4*(p3>>0&0xFF) + (p4>>0&0xFF)) >> 4;
+					u32 g = ((p0>>8&0xFF) + 4*(p1>>8&0xFF) + 6*(p2>>8&0xFF) + 4*(p3>>8&0xFF) + (p4>>8&0xFF)) >> 4;
+					u32 b = ((p0>>16&0xFF) + 4*(p1>>16&0xFF) + 6*(p2>>16&0xFF) + 4*(p3>>16&0xFF) + (p4>>16&0xFF)) >> 4;
+					u32 a = p2 >> 24;
+					horiz[py * tile_width + px] = r | (g << 8) | (b << 16) | (a << 24);
+				}
+			}
+			// Pass 2: vertical Gaussian [1 4 6 4 1]/16.
+			for (i32 py = 0; py < tile_height; ++py) {
+				i32 y0 = py - 2; if (y0 < 0) y0 = 0;
+				i32 y1 = py - 1; if (y1 < 0) y1 = 0;
+				i32 y2 = py;
+				i32 y3 = py + 1; if (y3 >= tile_height) y3 = tile_height - 1;
+				i32 y4 = py + 2; if (y4 >= tile_height) y4 = tile_height - 1;
+				for (i32 px = 0; px < tile_width; ++px) {
+					u32 p0 = horiz[y0 * tile_width + px];
+					u32 p1 = horiz[y1 * tile_width + px];
+					u32 p2 = horiz[y2 * tile_width + px];
+					u32 p3 = horiz[y3 * tile_width + px];
+					u32 p4 = horiz[y4 * tile_width + px];
+					u32 r = ((p0>>0&0xFF) + 4*(p1>>0&0xFF) + 6*(p2>>0&0xFF) + 4*(p3>>0&0xFF) + (p4>>0&0xFF)) >> 4;
+					u32 g = ((p0>>8&0xFF) + 4*(p1>>8&0xFF) + 6*(p2>>8&0xFF) + 4*(p3>>8&0xFF) + (p4>>8&0xFF)) >> 4;
+					u32 b = ((p0>>16&0xFF) + 4*(p1>>16&0xFF) + 6*(p2>>16&0xFF) + 4*(p3>>16&0xFF) + (p4>>16&0xFF)) >> 4;
+					u32 a = p2 >> 24;
+					blur[py * tile_width + px] = r | (g << 8) | (b << 16) | (a << 24);
+				}
+			}
+
+			// Unsharp mask: out = original + gain * (original - blur).
+			i32 gain_fp = (i32)(wsi->sharpness / 10.0f * 256.0f + 0.5f);
+			i32 n_simd = (n_pixels / 4) * 4;
+#if defined(__SSE2__)
+			{
+				__m128i zero   = _mm_setzero_si128();
+				__m128i gain_v = _mm_set1_epi16((short)gain_fp);
+				for (i32 i = 0; i < n_simd; i += 4) {
+					__m128i orig = _mm_loadu_si128((__m128i*)(out_buffer_or_null + i));
+					__m128i bl   = _mm_loadu_si128((__m128i*)(blur + i));
+					__m128i o_lo = _mm_unpacklo_epi8(orig, zero);
+					__m128i b_lo = _mm_unpacklo_epi8(bl, zero);
+					__m128i o_hi = _mm_unpackhi_epi8(orig, zero);
+					__m128i b_hi = _mm_unpackhi_epi8(bl, zero);
+					__m128i d_lo = _mm_sub_epi16(o_lo, b_lo);
+					__m128i d_hi = _mm_sub_epi16(o_hi, b_hi);
+					__m128i s_lo = _mm_or_si128(_mm_slli_epi16(_mm_mulhi_epi16(d_lo, gain_v), 8),
+					                            _mm_srli_epi16(_mm_mullo_epi16(d_lo, gain_v), 8));
+					__m128i s_hi = _mm_or_si128(_mm_slli_epi16(_mm_mulhi_epi16(d_hi, gain_v), 8),
+					                            _mm_srli_epi16(_mm_mullo_epi16(d_hi, gain_v), 8));
+					__m128i r_lo = _mm_add_epi16(o_lo, s_lo);
+					__m128i r_hi = _mm_add_epi16(o_hi, s_hi);
+					_mm_storeu_si128((__m128i*)(out_buffer_or_null + i), _mm_packus_epi16(r_lo, r_hi));
+				}
+			}
+#elif defined(__ARM_NEON)
+			{
+				int16_t gain16 = (int16_t)gain_fp;
+				for (i32 i = 0; i < n_simd; i += 4) {
+					uint8x16_t orig16 = vld1q_u8((uint8_t*)(out_buffer_or_null + i));
+					uint8x16_t blur16 = vld1q_u8((uint8_t*)(blur + i));
+					int16x8_t o_lo = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(orig16)));
+					int16x8_t b_lo = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(blur16)));
+					int16x8_t o_hi = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(orig16)));
+					int16x8_t b_hi = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(blur16)));
+					int16x8_t d_lo = vsubq_s16(o_lo, b_lo);
+					int16x8_t d_hi = vsubq_s16(o_hi, b_hi);
+					int16x8_t s_lo = vcombine_s16(
+					    vshrn_n_s32(vmull_n_s16(vget_low_s16(d_lo), gain16), 8),
+					    vshrn_n_s32(vmull_n_s16(vget_high_s16(d_lo), gain16), 8));
+					int16x8_t s_hi = vcombine_s16(
+					    vshrn_n_s32(vmull_n_s16(vget_low_s16(d_hi), gain16), 8),
+					    vshrn_n_s32(vmull_n_s16(vget_high_s16(d_hi), gain16), 8));
+					int16x8_t r_lo = vaddq_s16(o_lo, s_lo);
+					int16x8_t r_hi = vaddq_s16(o_hi, s_hi);
+					vst1q_u8((uint8_t*)(out_buffer_or_null + i),
+					         vcombine_u8(vqmovun_s16(r_lo), vqmovun_s16(r_hi)));
+				}
+			}
+#else
+			n_simd = 0;
+#endif
+			for (i32 i = n_simd; i < n_pixels; ++i) {
+				u32 orig = out_buffer_or_null[i];
+				u32 bl   = blur[i];
+				i32 r = (i32)(orig >>  0 & 0xFF) + ((gain_fp * ((i32)(orig>> 0&0xFF) - (i32)(bl>> 0&0xFF))) >> 8);
+				i32 g = (i32)(orig >>  8 & 0xFF) + ((gain_fp * ((i32)(orig>> 8&0xFF) - (i32)(bl>> 8&0xFF))) >> 8);
+				i32 b = (i32)(orig >> 16 & 0xFF) + ((gain_fp * ((i32)(orig>>16&0xFF) - (i32)(bl>>16&0xFF))) >> 8);
+				if (r < 0) r = 0; else if (r > 255) r = 255;
+				if (g < 0) g = 0; else if (g > 255) g = 255;
+				if (b < 0) b = 0; else if (b > 255) b = 255;
+				out_buffer_or_null[i] = (u32)r | ((u32)g << 8) | ((u32)b << 16) | (orig & 0xFF000000u);
+			}
+		}
+	}
+
+	release_temp_memory(&temp_memory); // free Y, Co, Cg, and any postprocessing temp buffers
 }
 
 

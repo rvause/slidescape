@@ -131,3 +131,16 @@ isyntax_error_t libisyntax_read_macro_image(isyntax_t* isyntax, int32_t* width, 
 isyntax_error_t libisyntax_read_label_image_jpeg(isyntax_t* isyntax, uint8_t** jpeg_buffer, uint32_t* jpeg_size);
 isyntax_error_t libisyntax_read_macro_image_jpeg(isyntax_t* isyntax, uint8_t** jpeg_buffer, uint32_t* jpeg_size);
 isyntax_error_t libisyntax_read_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, uint8_t** icc_profile_buffer, uint32_t* icc_profile_size);
+
+//== Post-processing API ==
+typedef struct libisyntax_postprocessing_params_t {
+    float sharpness;    /* 0-10,  default 0;   unsharp mask strength; 0 = disabled */
+    float contrast;     /* 1-4,   default 1.0; centre-pivoted contrast multiplier  */
+    float gamma;        /* 1-5,   default 1.0; display gamma (output = input^(1/gamma)) */
+    float black_point;  /* 0-1,   default 0;   input black clipping level          */
+    float white_point;  /* 0-1,   default 1;   input white clipping level          */
+} libisyntax_postprocessing_params_t;
+
+isyntax_error_t libisyntax_image_set_postprocessing(
+    isyntax_image_t* image,
+    const libisyntax_postprocessing_params_t* params);

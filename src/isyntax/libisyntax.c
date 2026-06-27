@@ -511,6 +511,52 @@ isyntax_error_t libisyntax_read_macro_image_jpeg(isyntax_t* isyntax, uint8_t** j
     return libisyntax_read_assocatiated_image_jpeg(isyntax, macro_image, jpeg_buffer, jpeg_size);
 }
 
+isyntax_error_t libisyntax_image_set_postprocessing(isyntax_image_t* image,
+                                                    const libisyntax_postprocessing_params_t* params) {
+    if (params == NULL) {
+        image->postprocessing_enabled = false;
+        return LIBISYNTAX_OK;
+    }
+
+    image->sharpness = params->sharpness;
+
+    float black = params->black_point;
+    float white = params->white_point;
+    float contrast = params->contrast;
+    float gamma = params->gamma;
+
+    float range = white - black;
+    bool valid_range = (range > 1e-6f);
+
+    for (int x = 0; x < 256; ++x) {
+        float f = (float)x / 255.0f;
+        if (valid_range) {
+            f = (f - black) / range;
+        } else {
+            f = (f <= black) ? 0.0f : 1.0f;
+        }
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        f = 0.5f + contrast * (f - 0.5f);
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        if (gamma > 1e-6f) {
+            f = powf(f, 1.0f / gamma);
+        }
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        int out = (int)(f * 255.0f + 0.5f);
+        if (out < 0) out = 0;
+        if (out > 255) out = 255;
+        image->tone_lut[x] = (uint8_t)out;
+    }
+
+    bool identity_lut = (contrast == 1.0f && gamma == 1.0f && black == 0.0f && white == 1.0f);
+    image->postprocessing_enabled = (params->sharpness != 0.0f || !identity_lut);
+
+    return LIBISYNTAX_OK;
+}
+
 isyntax_error_t libisyntax_read_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, uint8_t** icc_profile_buffer, uint32_t* icc_profile_size) {
     ASSERT(icc_profile_buffer);
     ASSERT(icc_profile_size);

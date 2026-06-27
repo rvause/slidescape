@@ -1396,6 +1396,49 @@ void gui_draw(app_state_t* app_state, input_t* input, i32 client_width, i32 clie
 		}
 		ImGui::NewLine();
 
+		// iSyntax display post-processing — shown only for iSyntax images.
+		{
+			image_t* pp_img = (arrlen(app_state->loaded_images) > 0) ? app_state->loaded_images[0] : NULL;
+			bool is_isyntax = (pp_img && pp_img->backend == IMAGE_BACKEND_ISYNTAX);
+
+			if (!is_isyntax) ImGui::BeginDisabled();
+
+			ImGui::SeparatorText("iSyntax display");
+
+			// Use direct pointer — local copies re-initialized each frame cause stale-value
+			// saves on the slider release frame (ImGui clears active ID without updating *v).
+			static libisyntax_postprocessing_params_t pp_dummy = {0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+			libisyntax_postprocessing_params_t* ppp = is_isyntax ? &pp_img->isyntax_pp_params : &pp_dummy;
+
+			bool pp_on = is_isyntax && pp_img->isyntax_postprocessing_on;
+			if (ImGui::Checkbox("Enable", &pp_on) && is_isyntax) {
+				pp_img->isyntax_postprocessing_on = pp_on;
+				image_isyntax_apply_postprocessing_params(pp_img, pp_on ? &pp_img->isyntax_pp_params : NULL);
+			}
+
+			if (!pp_on) ImGui::BeginDisabled();
+
+			ImGui::SliderFloat("Sharpness",   &ppp->sharpness,   0.0f, 10.0f);
+			if (ImGui::IsItemDeactivatedAfterEdit() && is_isyntax)
+				image_isyntax_apply_postprocessing_params(pp_img, &pp_img->isyntax_pp_params);
+			ImGui::SliderFloat("Contrast",    &ppp->contrast,    1.0f, 4.0f);
+			if (ImGui::IsItemDeactivatedAfterEdit() && is_isyntax)
+				image_isyntax_apply_postprocessing_params(pp_img, &pp_img->isyntax_pp_params);
+			ImGui::SliderFloat("Gamma",       &ppp->gamma,       1.0f, 5.0f);
+			if (ImGui::IsItemDeactivatedAfterEdit() && is_isyntax)
+				image_isyntax_apply_postprocessing_params(pp_img, &pp_img->isyntax_pp_params);
+			ImGui::SliderFloat("Black point", &ppp->black_point, 0.0f, 1.0f);
+			if (ImGui::IsItemDeactivatedAfterEdit() && is_isyntax)
+				image_isyntax_apply_postprocessing_params(pp_img, &pp_img->isyntax_pp_params);
+			ImGui::SliderFloat("White point", &ppp->white_point, 0.0f, 1.0f);
+			if (ImGui::IsItemDeactivatedAfterEdit() && is_isyntax)
+				image_isyntax_apply_postprocessing_params(pp_img, &pp_img->isyntax_pp_params);
+
+			if (!pp_on) ImGui::EndDisabled();
+			if (!is_isyntax) ImGui::EndDisabled();
+			ImGui::NewLine();
+		}
+
 		ImGui::Checkbox("Use image adjustments", &app_state->use_image_adjustments);
 
 		bool disable_gui = !app_state->use_image_adjustments;

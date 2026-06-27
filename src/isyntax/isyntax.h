@@ -321,6 +321,9 @@ typedef struct isyntax_image_t {
 	bool header_codeblocks_are_partial;
 	bool first_load_complete;
 	bool first_load_in_progress;
+	bool postprocessing_enabled;
+	float sharpness;
+	uint8_t tone_lut[256];
 	i64 base64_encoded_icc_profile_file_offset;
 	size_t base64_encoded_icc_profile_len;
 } isyntax_image_t;

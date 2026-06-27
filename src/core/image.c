@@ -390,6 +390,14 @@ bool init_image_from_isyntax(image_t* image, isyntax_t* isyntax, bool is_overlay
     image->isyntax = *isyntax;
     isyntax = &image->isyntax;
     image->is_freshly_loaded = true;
+    image->isyntax_pp_params = (libisyntax_postprocessing_params_t){
+        .sharpness   = 2.0f,
+        .contrast    = 1.2f,
+        .gamma       = 1.0f,
+        .black_point = 0.0f,
+        .white_point = 1.0f,
+    };
+    image->isyntax_postprocessing_on = false;
 
     image->mpp_x = isyntax->mpp_x;
     image->mpp_y = isyntax->mpp_y;
@@ -1546,5 +1554,34 @@ void image_destroy(image_t* image) {
 			image->lock_initialized = false;
 		}
 
+	}
+}
+
+void image_isyntax_apply_postprocessing_params(image_t* image, const libisyntax_postprocessing_params_t* params) {
+	if (image->backend != IMAGE_BACKEND_ISYNTAX) return;
+	isyntax_t* isyntax = &image->isyntax;
+	isyntax_image_t* wsi = isyntax->images + isyntax->wsi_image_index;
+
+	libisyntax_image_set_postprocessing(wsi, params);
+	if (params != NULL)
+		image->isyntax_pp_params = *params;
+
+	for (i32 level = 0; level < wsi->level_count; ++level) {
+		isyntax_level_t* lvl = wsi->levels + level;
+		lvl->is_fully_loaded = false;
+		for (i32 ti = 0; ti < lvl->tile_count; ++ti) {
+			isyntax_tile_t* tile = lvl->tiles + ti;
+			tile->is_loaded = false;
+			tile->is_submitted_for_loading = false;
+		}
+	}
+	if (image->tile_cache) {
+		for (i32 level = 0; level < image->level_count; ++level) {
+			tile_cache_tile_t* tiles = image->tile_cache->level_tiles[level];
+			if (!tiles) continue;
+			i32 tile_count = (i32)image->level_images[level].tile_count;
+			for (i32 ti = 0; ti < tile_count; ++ti)
+				tiles[ti].gpu_resident = false;
+		}
 	}
 }
