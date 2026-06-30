@@ -3113,6 +3113,7 @@ bool isyntax_open(isyntax_t* isyntax, const char* filename, enum libisyntax_open
 	ASSERT(isyntax);
 
 	isyntax->open_flags = flags;
+	isyntax_pp_params_defaults(&isyntax->pp_params);
 
 	int ret = 0; (void)ret;
 	file_stream_t fp = file_stream_open_for_reading(filename);
@@ -3702,6 +3703,12 @@ void isyntax_destroy(isyntax_t* isyntax) {
 	}
 	if (isyntax->cache) {
 		libisyntax_cache_destroy(isyntax->cache);
+	}
+	isyntax_pp_setup_destroy(isyntax->pp_setup);
+	isyntax->pp_setup = NULL;
+	if (isyntax->pp_coarse_bgra) {
+		free(isyntax->pp_coarse_bgra);
+		isyntax->pp_coarse_bgra = NULL;
 	}
 	file_handle_close(isyntax->file_handle);
 }

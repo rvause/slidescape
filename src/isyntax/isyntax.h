@@ -39,6 +39,7 @@ extern "C" {
 #include "platform.h"
 
 #include "yxml.h"
+#include "isyntax_postprocess.h"
 
 #define DWT_COEFF_BITS 16
 #if (DWT_COEFF_BITS==16)
@@ -421,6 +422,13 @@ typedef struct isyntax_t {
 	double dicom_lossy_image_compression_ratio;
 	char dicom_lossy_image_compression_method[65]; // e.g. "PHILIPS_DP_1_0"
 	char image_dimension_unit[65];
+	isyntax_pp_params_t  pp_params;
+	isyntax_pp_setup_t*  pp_setup;           // precomputed CLAHE grid + contrast LUT; NULL until first_load done
+	u32*                 pp_coarse_bgra;     // stitched coarsest-level BGRA; kept in RAM for live param changes
+	i32                  pp_coarse_w;
+	i32                  pp_coarse_h;
+	float                pp_coarse_downsample;
+	bool                 pp_needs_reload;    // set by GUI when params change; viewer evicts tiles and rebuilds setup
 } isyntax_t;
 
 // function prototypes

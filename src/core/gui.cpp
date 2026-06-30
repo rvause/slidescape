@@ -1426,6 +1426,50 @@ void gui_draw(app_state_t* app_state, input_t* input, i32 client_width, i32 clie
 		ImGui::NewLine();
 		ImGui::ColorEdit3("Background color", (float*) &app_state->clear_color); // Edit 3 floats representing a color
 
+		// iSyntax display post-processing
+		image_t* first_isyntax = NULL;
+		for (i32 img_i = 0; img_i < arrlen(app_state->loaded_images); ++img_i) {
+			if (app_state->loaded_images[img_i]->backend == IMAGE_BACKEND_ISYNTAX) {
+				first_isyntax = app_state->loaded_images[img_i];
+				break;
+			}
+		}
+		if (first_isyntax) {
+			ImGui::NewLine();
+			if (ImGui::CollapsingHeader("iSyntax post-processing")) {
+				isyntax_pp_params_t* pp = &first_isyntax->isyntax.pp_params;
+				bool pp_changed = false;
+
+				pp_changed |= ImGui::Checkbox("CLAHE##pp", &pp->apply_clahe);
+				if (!pp->apply_clahe) ImGui::BeginDisabled();
+				if (ImGui::SliderFloat("Clip limit##pp", &pp->clahe_clip_limit, 0.5f, 4.0f, "%.1f")) {
+					pp->clahe_clip_limit = roundf(pp->clahe_clip_limit * 10.0f) / 10.0f;
+					pp_changed = true;
+				}
+				pp_changed |= ImGui::SliderInt("Context size##pp", &pp->clahe_context_dim, 8, 80);
+				if (!pp->apply_clahe) ImGui::EndDisabled();
+
+				pp_changed |= ImGui::Checkbox("Sharpness##pp", &pp->apply_sharpness);
+				if (!pp->apply_sharpness) ImGui::BeginDisabled();
+				if (ImGui::SliderFloat("Sharpness gain##pp", &pp->sharpness_gain, 0.0f, 10.0f, "%.1f")) {
+					pp->sharpness_gain = roundf(pp->sharpness_gain * 10.0f) / 10.0f;
+					pp_changed = true;
+				}
+				if (!pp->apply_sharpness) ImGui::EndDisabled();
+
+				pp_changed |= ImGui::Checkbox("Contrast##pp", &pp->apply_contrast);
+				if (!pp->apply_contrast) ImGui::BeginDisabled();
+				if (ImGui::SliderFloat("Contrast###pp_contrast_slider", &pp->contrast, 0.5f, 4.0f, "%.1f")) {
+					pp->contrast = roundf(pp->contrast * 10.0f) / 10.0f;
+					pp_changed = true;
+				}
+				if (!pp->apply_contrast) ImGui::EndDisabled();
+
+				if (pp_changed) {
+					first_isyntax->isyntax.pp_needs_reload = true;
+				}
+			}
+		}
 
 		ImGui::End();
 	}

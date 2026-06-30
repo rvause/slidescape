@@ -311,6 +311,7 @@ set(SLIDESCAPE_NONGUI_BASE_FILES
         src/dicom/dicom_dict.c
         src/dicom/dicom_wsi.c
         src/isyntax/isyntax.c
+        src/isyntax/isyntax_postprocess.c
         src/isyntax/isyntax_reader.c
         src/isyntax/isyntax_streamer.c
         src/isyntax/libisyntax.c

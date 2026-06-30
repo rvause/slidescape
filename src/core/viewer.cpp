@@ -99,6 +99,27 @@ void add_image(app_state_t* app_state, image_t* image, bool need_zoom_reset, boo
     copy_cstring(app_state->last_active_directory, image->directory, COUNT(app_state->last_active_directory));
 }
 
+static void isyntax_invalidate_tiles(image_t* image) {
+	// Free all GPU tile textures so they are re-streamed with the new pp params
+	for (i32 i = 0; i < image->level_count; ++i) {
+		level_image_t* level = image->level_images + i;
+		for (i32 j = 0; j < level->tile_count; ++j) {
+			renderer_texture_handle_t tex = tile_cache_take_gpu_texture(image, i, j);
+			if (tex) renderer_destroy_texture(tex);
+		}
+	}
+	// Reset isyntax per-tile load flags so the streamer re-requests them
+	isyntax_t* isyntax = &image->isyntax;
+	isyntax_image_t* wsi = isyntax->images + isyntax->wsi_image_index;
+	for (i32 s = 0; s <= wsi->max_scale; ++s) {
+		isyntax_level_t* lvl = wsi->levels + s;
+		for (i32 j = 0; j < lvl->tile_count; ++j) {
+			lvl->tiles[j].is_loaded = false;
+			lvl->tiles[j].is_submitted_for_loading = false;
+		}
+	}
+}
+
 void renderer_destroy_image_resources(image_t* image) {
 	if (!image) return;
 
@@ -499,6 +520,22 @@ void update_and_render_image(app_state_t* app_state, image_t* image) {
 				wsi->first_load_in_progress = true;
 				isyntax_begin_first_load(&tile_streamer);
 			} else if (wsi->first_load_complete) {
+				if (isyntax->pp_needs_reload) {
+					isyntax->pp_needs_reload = false;
+					// Drain all in-flight tile tasks before touching pp_setup: worker threads hold a
+					// pointer into pp_setup for the duration of isyntax_pp_apply_bgra, so freeing
+					// the old setup while any task is still running is a use-after-free.
+					while (isyntax->refcount > 0) {
+						if (isyntax->work_submission_pool) {
+							thread_pool_do_work(isyntax->work_submission_pool);
+						}
+					}
+					isyntax_pp_setup_destroy(isyntax->pp_setup);
+					isyntax->pp_setup = isyntax_pp_setup_create(&isyntax->pp_params,
+						isyntax->pp_coarse_bgra, isyntax->pp_coarse_w, isyntax->pp_coarse_h,
+						isyntax->pp_coarse_downsample);
+					isyntax_invalidate_tiles(image);
+				}
 				tile_streamer.origin_offset = image->origin_offset; // TODO: superfluous?
 				if (!scene->restrict_load_bounds) {
 					tile_streamer.camera_bounds = scene->camera_bounds;

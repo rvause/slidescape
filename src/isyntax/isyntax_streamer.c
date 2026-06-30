@@ -69,6 +69,14 @@ static i32 isyntax_load_all_tiles_in_level(isyntax_streamer_t* streamer, i32 sca
                 u32* tile_pixels = (u32*)malloc(isyntax->tile_width * isyntax->tile_height * sizeof(u32));
 				isyntax_load_tile(isyntax, wsi, scale, tile_x, tile_y, isyntax->ll_coeff_block_allocator, tile_pixels, streamer->pixel_format);
 				if (tile_pixels) {
+					if (isyntax->pp_setup) {
+						i32 rds = 1 << scale;
+						isyntax_pp_apply_bgra(tile_pixels, isyntax->tile_width, isyntax->tile_height,
+							&isyntax->pp_params, isyntax->pp_setup,
+							(float)rds,
+							tile_x * isyntax->tile_width  * rds,
+							tile_y * isyntax->tile_height * rds);
+					}
 					submit_tile_completed(streamer, tile_pixels, scale, tile_index, isyntax->tile_width, isyntax->tile_height);
 				}
 			}
@@ -188,6 +196,8 @@ static void isyntax_do_first_load(isyntax_streamer_t* streamer) {
 		}
 	}
 
+	i32 first_load_base_refcount = isyntax->refcount; // capture before tile tasks are submitted
+
 	// Transform and submit the top level tiles
 	tiles_loaded += isyntax_load_all_tiles_in_level(streamer, scale);
 
@@ -300,6 +310,50 @@ static void isyntax_do_first_load(isyntax_streamer_t* streamer) {
 	console_print("   iSyntax: loading the first %d tiles took %g seconds\n", tiles_loaded, get_seconds_elapsed(start_first_load, get_clock()));
 //	console_print("   total RGB transform time: %g seconds\n", total_rgb_transform_time);
 
+	// Drain tile tasks before re-running isyntax_load_tile() below: that call frees
+	// child LL coefficients that in-flight max_scale-1 tasks may still be reading.
+	while (isyntax->refcount > first_load_base_refcount) {
+		if (isyntax->work_submission_pool) {
+			thread_pool_do_work(isyntax->work_submission_pool);
+		}
+	}
+
+	// Decode max_scale tiles into a stitched BGRA buffer for CLAHE precomputation.
+	// LL/H coefficients are still live here; we re-decode a second time (fast, coarsest level only).
+	{
+		isyntax_level_t* cl = wsi->levels + wsi->max_scale;
+		i32 cw = cl->width_in_tiles  * isyntax->tile_width;
+		i32 ch = cl->height_in_tiles * isyntax->tile_height;
+		u32* coarse = (u32*)malloc((size_t)cw * (size_t)ch * sizeof(u32));
+		if (coarse) {
+			memset(coarse, 0xFF, (size_t)cw * (size_t)ch * sizeof(u32));
+			i32 tidx = 0;
+			u32* tile_tmp = (u32*)malloc((size_t)isyntax->tile_width * (size_t)isyntax->tile_height * sizeof(u32));
+			if (tile_tmp) {
+				for (i32 ty = 0; ty < cl->height_in_tiles; ++ty) {
+					for (i32 tx = 0; tx < cl->width_in_tiles; ++tx, ++tidx) {
+						if (!cl->tiles[tidx].exists) continue;
+						isyntax_load_tile(isyntax, wsi, wsi->max_scale, tx, ty,
+							isyntax->ll_coeff_block_allocator, tile_tmp, LIBISYNTAX_PIXEL_FORMAT_BGRA);
+						u32* dst_row = coarse + (size_t)ty * isyntax->tile_height * cw + (size_t)tx * isyntax->tile_width;
+						for (i32 row = 0; row < isyntax->tile_height; ++row) {
+							memcpy(dst_row + (size_t)row * cw,
+								tile_tmp + (size_t)row * isyntax->tile_width,
+								(size_t)isyntax->tile_width * sizeof(u32));
+						}
+					}
+				}
+				free(tile_tmp);
+			}
+			isyntax->pp_coarse_bgra        = coarse;
+			isyntax->pp_coarse_w           = cw;
+			isyntax->pp_coarse_h           = ch;
+			isyntax->pp_coarse_downsample  = (float)(1 << wsi->max_scale);
+			isyntax->pp_setup = isyntax_pp_setup_create(&isyntax->pp_params,
+				coarse, cw, ch, isyntax->pp_coarse_downsample);
+		}
+	}
+
 	// TODO: should we skip this? The coeffs might be needed again after all
 	i32 blocks_freed = 0;
 	for (i32 i = 0; i < levels_in_chunk; ++i) {
@@ -333,6 +387,7 @@ typedef struct isyntax_load_tile_task_t {
 	i32 tile_x;
 	i32 tile_y;
 	i32 tile_index;
+	isyntax_pp_params_t pp_params; // snapshot at submission time; avoids race with GUI slider writes
 } isyntax_load_tile_task_t;
 
 void isyntax_load_tile_task_func(i32 logical_thread_index, void* userdata) {
@@ -344,6 +399,15 @@ void isyntax_load_tile_task_func(i32 logical_thread_index, void* userdata) {
                       task->streamer.isyntax->ll_coeff_block_allocator,
                       tile_pixels, task->streamer.pixel_format);
 	if (tile_pixels) {
+		isyntax_pp_setup_t* pp_setup = isyntax->pp_setup; // local copy: avoids tear if main thread rebuilds
+		if (pp_setup) {
+			i32 rds = 1 << task->scale;
+			isyntax_pp_apply_bgra(tile_pixels, isyntax->tile_width, isyntax->tile_height,
+				&task->pp_params, pp_setup,
+				(float)rds,
+				task->tile_x * isyntax->tile_width  * rds,
+				task->tile_y * isyntax->tile_height * rds);
+		}
 		submit_tile_completed(&task->streamer, tile_pixels, task->scale, task->tile_index,
 							  task->streamer.isyntax->tile_width, task->streamer.isyntax->tile_height);
 	}
@@ -365,6 +429,7 @@ void isyntax_begin_load_tile(isyntax_streamer_t* streamer, i32 scale, i32 tile_x
 		task.tile_x = tile_x;
 		task.tile_y = tile_y;
 		task.tile_index = tile_index;
+		task.pp_params = isyntax->pp_params;
 
 		tile->is_submitted_for_loading = true;
 		atomic_increment(&isyntax->refcount); // retain; don't destroy isyntax while busy
